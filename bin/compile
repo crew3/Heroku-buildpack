@@ -11,43 +11,48 @@ BUILD_DIR="$1"
 CACHE_DIR="$2"
 ENV_DIR="$3"
 STAGE="$(mktemp -d)"
+BUILD_SCRIPT="heroku-postbuild"
 
-echo $SOURCE_VERSION
-git diff-tree --no-commit-id --name-only -r $SOURCE_VERSION
-
-if [ ! -f "${ENV_DIR}/APP_BASE" ]; then
-    echo "APP_BASE was not set. Aborting" | indent
-    exit 1
-fi
-APP_BASE="$(cat "${ENV_DIR}/APP_BASE")"
-
-if [ ! -f "${ENV_DIR}/DEPENDENCIES" ]; then
-    echo "No dependencies configured. If you wish to include local packages in monorepo with '../<package>' style depencies, set DEPENDENCIES." | indent
-else
-    DEPENDENCIES="$(cat "${ENV_DIR}/DEPENDENCIES")"
-fi
-
-(
-    mv "${BUILD_DIR}/${APP_BASE}" "${STAGE}" &&
-    if [ ! -z "$DEPENDENCIES" ]; then
-        echo "Processing dependencies" | indent
-        for DEPENDENCY in ${DEPENDENCIES}; do
-            if [ ! -d "${BUILD_DIR}/${DEPENDENCY}" ]; then
-                echo "Dependency ${DEPENDENCY} not found. Aborting" | indent
-                exit 1
-            fi
-            TARGET="${BUILD_DIR}/../$(basename "$DEPENDENCY")"
-            echo "Lifting dependency ${DEPENDENCY} from '${BUILD_DIR}/${DEPENDENCY}' to '${TARGET}'." | indent | indent
-            mv -v "${BUILD_DIR}/${DEPENDENCY}" "${TARGET}"
-        done
-    fi &&
-    rm -rf "${BUILD_DIR}"/* &&
-    mv "${STAGE}/$(basename "$APP_BASE")"/* "${BUILD_DIR}"
-)
-
-if [ $? -ne 0 ]; then
-    echo "FAILED to copy directories into place" | indent
+if [ ! -f "${ENV_DIR}/PACKAGE_NAME" ]; then
+    echo "PACKAGE_NAME was not set. Aborting" | indent
     exit 1
 fi
 
-echo "Copied ${APP_BASE} to root of app successfully" | indent
+PACKAGE_NAME="$(cat "${ENV_DIR}/PACKAGE_NAME")"
+
+if [ -f "${ENV_DIR}/BUILD_SCRIPT" ]; then
+    BUILD_SCRIPT="$(cat "${ENV_DIR}/BUILD_SCRIPT")"
+fi
+
+# build all packages and and project before prune
+cd "$BUILD_DIR" && \
+    pnpm turbo ${BUILD_SCRIPT} --filter=${PACKAGE_NAME}
+
+# installing prod dependencies
+echo "Installing production dependencies for ${PACKAGE_NAME}..." | indent
+
+echo "Prune ${PACKAGE_NAME} devDependencies" | indent
+pnpm clean
+rm -rf ./node_modules/
+pnpm --filter ${PACKAGE_NAME}... install --prod
+pnpm prune --prod
+
+if [ "${PACKAGE_NAME}" == "@crew3/discord" ] || [ "${PACKAGE_NAME}" == "@crew3/backend" ] || [ "${PACKAGE_NAME}" == "@crew3/tp-listener" ]; then
+    echo "Deleting webapp and client package" | indent
+    rm -rf ./packages/webapp
+    rm -rf ./packages/client
+    rm -rf ./packages/ds
+    rm -rf ./packages/queries
+    rm -rf ./packages/tokens
+    rm -rf ./.git
+    rm -rf ./.github
+    rm -rf ./packages/reverse-proxy
+    rm -rf ./packages/i18n
+    if [ "${PACKAGE_NAME}" == "@crew3/backend" ]; then
+        echo "Deleting discord bot package" | indent
+        rm -rf ./packages/discord-bot
+        rm -rf ./packages/tp-listener
+    fi
+
+fi
+
